@@ -1,0 +1,25 @@
+# Entorno
+.env
+.env.*
+!.env.example
+
+# Go
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.out
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Node/frontend futuro
+node_modules/
+build/
+.next/
