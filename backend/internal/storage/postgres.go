@@ -86,6 +86,29 @@ CREATE TABLE IF NOT EXISTS document_classifications (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE document_classifications
+  ADD COLUMN IF NOT EXISTS drive_file_id TEXT,
+  ADD COLUMN IF NOT EXISTS file_name TEXT,
+  ADD COLUMN IF NOT EXISTS file_name_normalized TEXT,
+  ADD COLUMN IF NOT EXISTS mime_type TEXT,
+  ADD COLUMN IF NOT EXISTS path TEXT,
+  ADD COLUMN IF NOT EXISTS source TEXT,
+  ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION,
+  ADD COLUMN IF NOT EXISTS tags_json JSONB,
+  ADD COLUMN IF NOT EXISTS keywords_json JSONB,
+  ADD COLUMN IF NOT EXISTS justification TEXT,
+  ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+UPDATE document_classifications
+SET source = 'usuario_validado'
+WHERE source IS NULL OR source = '';
+
+UPDATE document_classifications
+SET tags_json = '{}'::jsonb
+WHERE tags_json IS NULL;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_document_classifications_drive_file_id_unique
 ON document_classifications (drive_file_id)
 WHERE drive_file_id IS NOT NULL AND drive_file_id <> '';
