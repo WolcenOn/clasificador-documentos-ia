@@ -6,12 +6,32 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/WolcenOn/clasificador-documentos-ia/backend/internal/classifier"
+	"github.com/WolcenOn/clasificador-documentos-ia/backend/internal/gemini"
 )
 
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+type confirmRequest struct {
+	DriveFileID  string         `json:"driveFileId"`
+	FileName     string         `json:"fileName"`
+	MIMEType     string         `json:"mimeType"`
+	Path         string         `json:"path"`
+	Tags         map[string]any `json:"tags"`
+	Source       string         `json:"source"`
+	ConfirmedAt  string         `json:"confirmedAt,omitempty"`
+}
+
+type confirmResponse struct {
+	Status      string         `json:"status"`
+	Source      string         `json:"source"`
+	DriveFileID string         `json:"driveFileId,omitempty"`
+	FileName    string         `json:"fileName,omitempty"`
+	Tags        map[string]any `json:"tags"`
 }
 
 func main() {
@@ -23,6 +43,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("POST /api/classify", handleClassify)
+	mux.HandleFunc("POST /api/confirm", handleConfirm)
 
 	wrapped := withCORS(withAuth(mux))
 
@@ -53,8 +74,92 @@ func handleClassify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := classifier.Classify(req)
-	writeJSON(w, http.StatusOK, result)
+	rulesResult := classifier.Classify(req)
+
+	mode := geminiMode()
+	if !shouldUseGemini(mode, rulesResult) {
+		writeJSON(w, http.StatusOK, rulesResult)
+		return
+	}
+
+	client := gemini.New(os.Getenv("GEMINI_API_KEY"), os.Getenv("GEMINI_MODEL"))
+	if !client.Enabled() {
+		log.Printf("Gemini solicitado con GEMINI_MODE=%s, pero falta GEMINI_API_KEY; se devuelven reglas", mode)
+		writeJSON(w, http.StatusOK, rulesResult)
+		return
+	}
+
+	geminiResult, err := client.Classify(r.Context(), req, rulesResult)
+	if err != nil {
+		log.Printf("error Gemini; fallback reglas: %v", err)
+		writeJSON(w, http.StatusOK, rulesResult)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, geminiResult)
+}
+
+func handleConfirm(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	var req confirmRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "JSON inválido"})
+		return
+	}
+
+	if strings.TrimSpace(req.FileName) == "" && strings.TrimSpace(req.DriveFileID) == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "fileName o driveFileId es obligatorio"})
+		return
+	}
+
+	if len(req.Tags) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "tags es obligatorio"})
+		return
+	}
+
+	if strings.TrimSpace(req.Source) == "" {
+		req.Source = "usuario_validado"
+	}
+	if strings.TrimSpace(req.ConfirmedAt) == "" {
+		req.ConfirmedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	// Siguiente fase: persistir esto en PostgreSQL.
+	// Por ahora confirmamos que el endpoint recibe y valida correctamente.
+	log.Printf("clasificación confirmada: file=%s id=%s source=%s tags=%v", req.FileName, req.DriveFileID, req.Source, req.Tags)
+
+	writeJSON(w, http.StatusOK, confirmResponse{
+		Status:      "ok",
+		Source:      req.Source,
+		DriveFileID: req.DriveFileID,
+		FileName:    req.FileName,
+		Tags:        req.Tags,
+	})
+}
+
+func geminiMode() string {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("GEMINI_MODE")))
+	if mode == "" {
+		return "off"
+	}
+	return mode
+}
+
+func shouldUseGemini(mode string, rulesResult classifier.Response) bool {
+	switch mode {
+	case "always":
+		return true
+	case "low_confidence":
+		return rulesResult.ConfianzaGlobal < 0.80
+	case "missing_only":
+		// Cuando añadamos PostgreSQL, aquí se usará: no encontrado en base de datos → Gemini.
+		return true
+	case "off":
+		return false
+	default:
+		return false
+	}
 }
 
 func withAuth(next http.Handler) http.Handler {
