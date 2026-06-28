@@ -10,6 +10,7 @@ import (
 
 	"github.com/WolcenOn/clasificador-documentos-ia/backend/internal/classifier"
 	"github.com/WolcenOn/clasificador-documentos-ia/backend/internal/gemini"
+	"github.com/WolcenOn/clasificador-documentos-ia/backend/internal/storage"
 )
 
 type errorResponse struct {
@@ -17,13 +18,13 @@ type errorResponse struct {
 }
 
 type confirmRequest struct {
-	DriveFileID  string         `json:"driveFileId"`
-	FileName     string         `json:"fileName"`
-	MIMEType     string         `json:"mimeType"`
-	Path         string         `json:"path"`
-	Tags         map[string]any `json:"tags"`
-	Source       string         `json:"source"`
-	ConfirmedAt  string         `json:"confirmedAt,omitempty"`
+	DriveFileID string         `json:"driveFileId"`
+	FileName    string         `json:"fileName"`
+	MIMEType    string         `json:"mimeType"`
+	Path        string         `json:"path"`
+	Tags        map[string]any `json:"tags"`
+	Source      string         `json:"source"`
+	ConfirmedAt string         `json:"confirmedAt,omitempty"`
 }
 
 type confirmResponse struct {
@@ -32,7 +33,10 @@ type confirmResponse struct {
 	DriveFileID string         `json:"driveFileId,omitempty"`
 	FileName    string         `json:"fileName,omitempty"`
 	Tags        map[string]any `json:"tags"`
+	Persisted   bool           `json:"persisted"`
 }
+
+var dbStore *storage.DB
 
 func main() {
 	port := os.Getenv("PORT")
@@ -40,8 +44,20 @@ func main() {
 		port = "8080"
 	}
 
+	store, err := storage.Open(os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Printf("PostgreSQL no disponible; el backend funcionará sin persistencia: %v", err)
+	} else if store != nil && store.Enabled() {
+		dbStore = store
+		defer dbStore.Close()
+		log.Printf("PostgreSQL conectado y esquema preparado")
+	} else {
+		log.Printf("DATABASE_URL vacío; /api/confirm no persistirá en PostgreSQL")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
+	mux.HandleFunc("GET /api/debug/db", handleDBDebug)
 	mux.HandleFunc("GET /api/debug/gemini", handleGeminiDebug)
 	mux.HandleFunc("GET /api/debug/gemini-test", handleGeminiTest)
 	mux.HandleFunc("POST /api/classify", handleClassify)
@@ -59,6 +75,36 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
 		"service": "clasificador-documentos-ia",
+	})
+}
+
+func handleDBDebug(w http.ResponseWriter, r *http.Request) {
+	if dbStore == nil || !dbStore.Enabled() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":           "ok",
+			"database_url_set": strings.TrimSpace(os.Getenv("DATABASE_URL")) != "",
+			"db_enabled":       false,
+			"count":            0,
+		})
+		return
+	}
+
+	count, err := dbStore.CountClassifications(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":           "error",
+			"database_url_set": strings.TrimSpace(os.Getenv("DATABASE_URL")) != "",
+			"db_enabled":       true,
+			"error":            err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":           "ok",
+		"database_url_set": true,
+		"db_enabled":       true,
+		"count":            count,
 	})
 }
 
@@ -83,14 +129,14 @@ func handleGeminiTest(w http.ResponseWriter, r *http.Request) {
 		DriveFileID: "debug_gemini_test",
 		Path:        "RECURSOS / EVALUACION / DISFEMIA",
 		AllowedOptions: map[string][]string{
-			"tematica":          {"Lengua", "Psicología", "Matemáticas", "Otro"},
-			"edad_objetivo":     {"3-5", "6-8", "9-12", "13-15", "Adultos"},
-			"nivel":             {"Básico", "Intermedio", "Avanzado"},
-			"campo_aplicacion":  {"Escolar", "Universitario", "Otro"},
-			"tipo_documento":    {"PDF", "Imagen", "Google Docs", "Otro"},
-			"idioma":            {"es", "en", "Otro"},
-			"estado":            {"Borrador", "Final"},
-			"permisos":          {"Propio", "Compartido (ver)", "Compartido (editar)"},
+			"tematica":         {"Lengua", "Psicología", "Matemáticas", "Otro"},
+			"edad_objetivo":    {"3-5", "6-8", "9-12", "13-15", "Adultos"},
+			"nivel":            {"Básico", "Intermedio", "Avanzado"},
+			"campo_aplicacion": {"Escolar", "Universitario", "Otro"},
+			"tipo_documento":   {"PDF", "Imagen", "Google Docs", "Otro"},
+			"idioma":           {"es", "en", "Otro"},
+			"estado":           {"Borrador", "Final"},
+			"permisos":         {"Propio", "Compartido (ver)", "Compartido (editar)"},
 		},
 		CurrentTags: map[string]any{},
 	}
@@ -186,13 +232,34 @@ func handleConfirm(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.Source) == "" {
 		req.Source = "usuario_validado"
 	}
-	if strings.TrimSpace(req.ConfirmedAt) == "" {
-		req.ConfirmedAt = time.Now().UTC().Format(time.RFC3339)
+
+	confirmedAt := time.Now().UTC()
+	if strings.TrimSpace(req.ConfirmedAt) != "" {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(req.ConfirmedAt))
+		if err == nil {
+			confirmedAt = parsed
+		}
 	}
 
-	// Siguiente fase: persistir esto en PostgreSQL.
-	// Por ahora confirmamos que el endpoint recibe y valida correctamente.
-	log.Printf("clasificación confirmada: file=%s id=%s source=%s tags=%v", req.FileName, req.DriveFileID, req.Source, req.Tags)
+	persisted := false
+	if dbStore != nil && dbStore.Enabled() {
+		if err := dbStore.SaveConfirmedClassification(r.Context(), storage.Classification{
+			DriveFileID: req.DriveFileID,
+			FileName:    req.FileName,
+			MIMEType:    req.MIMEType,
+			Path:        req.Path,
+			Tags:        req.Tags,
+			Source:      req.Source,
+			ConfirmedAt: confirmedAt,
+		}); err != nil {
+			log.Printf("error guardando clasificación en PostgreSQL: %v", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "no se pudo guardar en PostgreSQL: " + err.Error()})
+			return
+		}
+		persisted = true
+	}
+
+	log.Printf("clasificación confirmada: file=%s id=%s source=%s persisted=%v tags=%v", req.FileName, req.DriveFileID, req.Source, persisted, req.Tags)
 
 	writeJSON(w, http.StatusOK, confirmResponse{
 		Status:      "ok",
@@ -200,6 +267,7 @@ func handleConfirm(w http.ResponseWriter, r *http.Request) {
 		DriveFileID: req.DriveFileID,
 		FileName:    req.FileName,
 		Tags:        req.Tags,
+		Persisted:   persisted,
 	})
 }
 
