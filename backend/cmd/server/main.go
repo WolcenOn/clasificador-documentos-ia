@@ -42,6 +42,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
+	mux.HandleFunc("GET /api/debug/gemini", handleGeminiDebug)
 	mux.HandleFunc("POST /api/classify", handleClassify)
 	mux.HandleFunc("POST /api/confirm", handleConfirm)
 
@@ -57,6 +58,23 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "ok",
 		"service": "clasificador-documentos-ia",
+	})
+}
+
+func handleGeminiDebug(w http.ResponseWriter, r *http.Request) {
+	apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+	model := strings.TrimSpace(os.Getenv("GEMINI_MODEL"))
+	if model == "" {
+		model = "gemini-1.5-flash"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":              "ok",
+		"gemini_mode":         geminiMode(),
+		"gemini_model":        model,
+		"gemini_api_key_set":  apiKey != "",
+		"gemini_api_key_chars": len(apiKey),
+		"app_token_set":       strings.TrimSpace(os.Getenv("APP_TOKEN")) != "",
 	})
 }
 
