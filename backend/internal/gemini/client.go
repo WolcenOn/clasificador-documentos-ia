@@ -38,8 +38,8 @@ type geminiOption struct {
 }
 
 type generateContentRequest struct {
-	Contents         []content          `json:"contents"`
-	GenerationConfig generationConfig   `json:"generationConfig"`
+	Contents         []content        `json:"contents"`
+	GenerationConfig generationConfig `json:"generationConfig"`
 }
 
 type generationConfig struct {
@@ -101,9 +101,7 @@ func (c *Client) Classify(ctx context.Context, req classifier.Request, rules cla
 		Contents: []content{
 			{
 				Role: "user",
-				Parts: []part{
-					{Text: prompt},
-				},
+				Parts: []part{{Text: prompt}},
 			},
 		},
 		GenerationConfig: generationConfig{
@@ -134,7 +132,6 @@ func (c *Client) Classify(ctx context.Context, req classifier.Request, rules cla
 	if err != nil {
 		return classifier.Response{}, err
 	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return classifier.Response{}, fmt.Errorf("Gemini HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -150,8 +147,7 @@ func (c *Client) Classify(ctx context.Context, req classifier.Request, rules cla
 		return classifier.Response{}, errors.New("Gemini no devolvió texto")
 	}
 
-	text := strings.TrimSpace(genResp.Candidates[0].Content.Parts[0].Text)
-	text = stripJSONFence(text)
+	text := stripJSONFence(genResp.Candidates[0].Content.Parts[0].Text)
 
 	var parsed ClassificationResult
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
@@ -188,7 +184,6 @@ func (c *Client) Classify(ctx context.Context, req classifier.Request, rules cla
 			Justificacion: strings.TrimSpace(opt.Justificacion),
 		})
 	}
-
 	if len(options) == 0 {
 		return classifier.Response{}, errors.New("Gemini devolvió etiquetas fuera de las opciones permitidas")
 	}
@@ -213,15 +208,10 @@ func (c *Client) Classify(ctx context.Context, req classifier.Request, rules cla
 func buildPromptData(req classifier.Request, rules classifier.Response) map[string]any {
 	return map[string]any{
 		"documento": map[string]any{
-			"fileName":       req.FileName,
-			"mimeType":       req.MIMEType,
-			"driveFileId":    req.DriveFileID,
-			"path":           req.Path,
-			"sizeBytes":      req.SizeBytes,
-			"md5Checksum":    req.MD5Checksum,
-			"modifiedTime":   req.ModifiedTime,
-			"contentHash":    req.ContentHash,
-			"contentText":    truncate(req.ContentText, 12000),
+			"fileName":    req.FileName,
+			"mimeType":    req.MIMEType,
+			"driveFileId": req.DriveFileID,
+			"path":        req.Path,
 		},
 		"opciones_permitidas": req.AllowedOptions,
 		"etiquetas_actuales":  req.CurrentTags,
@@ -258,7 +248,7 @@ Formato exacto de salida:
         "palabras_clave": "lenguaje; actividad; vocabulario"
       },
       "palabras_clave": ["lenguaje", "actividad", "vocabulario"],
-      "justificacion": "Motivo breve basado en nombre, ruta, metadatos o texto extraído."
+      "justificacion": "Motivo breve basado en nombre, ruta o metadatos."
     }
   ]
 }
@@ -274,12 +264,10 @@ func normalizeTags(raw map[string]any, allowed map[string][]string) map[string]s
 		if field == "" {
 			continue
 		}
-
 		parts := valueToParts(value)
 		if len(parts) == 0 {
 			continue
 		}
-
 		allowedValues, hasAllowed := allowed[field]
 		if hasAllowed && len(allowedValues) > 0 {
 			valid := []string{}
@@ -294,8 +282,6 @@ func normalizeTags(raw map[string]any, allowed map[string][]string) map[string]s
 			}
 			continue
 		}
-
-		// Campos sin lista de opciones, por ejemplo palabras_clave.
 		clean := uniqueNonEmpty(parts)
 		if len(clean) > 0 {
 			out[field] = strings.Join(clean, "; ")
@@ -314,8 +300,6 @@ func valueToParts(value any) []string {
 			out = append(out, valueToParts(item)...)
 		}
 		return out
-	case []string:
-		return v
 	default:
 		if v == nil {
 			return nil
@@ -354,7 +338,7 @@ func makeOptionID(req classifier.Request, tags map[string]string, index int) str
 		pairs = append(pairs, k+"="+v)
 	}
 	sort.Strings(pairs)
-	base := req.DriveFileID + "|" + req.FileName + "|" + req.ContentHash + "|" + strings.Join(pairs, "|") + fmt.Sprintf("|%d", index)
+	base := req.DriveFileID + "|" + req.FileName + "|" + req.Path + "|" + strings.Join(pairs, "|") + fmt.Sprintf("|%d", index)
 	sum := sha256.Sum256([]byte(base))
 	return "gemini_" + hex.EncodeToString(sum[:])[:16]
 }
@@ -365,14 +349,6 @@ func stripJSONFence(text string) string {
 	text = strings.TrimPrefix(text, "```")
 	text = strings.TrimSuffix(text, "```")
 	return strings.TrimSpace(text)
-}
-
-func truncate(text string, max int) string {
-	text = strings.TrimSpace(text)
-	if len(text) <= max {
-		return text
-	}
-	return text[:max]
 }
 
 func uniqueNonEmpty(values []string) []string {
