@@ -43,6 +43,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("GET /api/debug/gemini", handleGeminiDebug)
+	mux.HandleFunc("GET /api/debug/gemini-test", handleGeminiTest)
 	mux.HandleFunc("POST /api/classify", handleClassify)
 	mux.HandleFunc("POST /api/confirm", handleConfirm)
 
@@ -63,10 +64,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func handleGeminiDebug(w http.ResponseWriter, r *http.Request) {
 	apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
-	model := strings.TrimSpace(os.Getenv("GEMINI_MODEL"))
-	if model == "" {
-		model = "gemini-1.5-flash"
-	}
+	model := geminiModel()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":              "ok",
@@ -75,6 +73,55 @@ func handleGeminiDebug(w http.ResponseWriter, r *http.Request) {
 		"gemini_api_key_set":  apiKey != "",
 		"gemini_api_key_chars": len(apiKey),
 		"app_token_set":       strings.TrimSpace(os.Getenv("APP_TOKEN")) != "",
+	})
+}
+
+func handleGeminiTest(w http.ResponseWriter, r *http.Request) {
+	req := classifier.Request{
+		FileName:    "prueba disfemia registro.pdf",
+		MIMEType:    "application/pdf",
+		DriveFileID: "debug_gemini_test",
+		Path:        "RECURSOS / EVALUACION / DISFEMIA",
+		AllowedOptions: map[string][]string{
+			"tematica":          {"Lengua", "Psicología", "Matemáticas", "Otro"},
+			"edad_objetivo":     {"3-5", "6-8", "9-12", "13-15", "Adultos"},
+			"nivel":             {"Básico", "Intermedio", "Avanzado"},
+			"campo_aplicacion":  {"Escolar", "Universitario", "Otro"},
+			"tipo_documento":    {"PDF", "Imagen", "Google Docs", "Otro"},
+			"idioma":            {"es", "en", "Otro"},
+			"estado":            {"Borrador", "Final"},
+			"permisos":          {"Propio", "Compartido (ver)", "Compartido (editar)"},
+		},
+		CurrentTags: map[string]any{},
+	}
+
+	rulesResult := classifier.Classify(req)
+	client := gemini.New(os.Getenv("GEMINI_API_KEY"), os.Getenv("GEMINI_MODEL"))
+	if !client.Enabled() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "error",
+			"error":  "GEMINI_API_KEY no configurada",
+		})
+		return
+	}
+
+	geminiResult, err := client.Classify(r.Context(), req, rulesResult)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":       "error",
+			"gemini_mode":  geminiMode(),
+			"gemini_model": geminiModel(),
+			"error":        err.Error(),
+			"fallback":     rulesResult,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       "ok",
+		"gemini_mode":  geminiMode(),
+		"gemini_model": geminiModel(),
+		"result":       geminiResult,
 	})
 }
 
@@ -162,6 +209,14 @@ func geminiMode() string {
 		return "off"
 	}
 	return mode
+}
+
+func geminiModel() string {
+	model := strings.TrimSpace(os.Getenv("GEMINI_MODEL"))
+	if model == "" {
+		return "gemini-1.5-flash"
+	}
+	return model
 }
 
 func shouldUseGemini(mode string, rulesResult classifier.Response) bool {
